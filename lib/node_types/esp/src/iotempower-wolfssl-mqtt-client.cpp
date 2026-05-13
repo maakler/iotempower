@@ -116,7 +116,7 @@ bool IoTempowerWolfsslTransport::startTls(const char* host) {
         return false;
     }
 
-    WOLFSSL_METHOD* method = wolfSSLv23_client_method();
+    WOLFSSL_METHOD* method = wolfTLSv1_2_client_method();
     if (!method) {
         return false;
     }
@@ -125,6 +125,20 @@ bool IoTempowerWolfsslTransport::startTls(const char* host) {
     if (!_ctx) {
         return false;
     }
+
+    if (wolfSSL_CTX_set_cipher_list(_ctx, "ECDHE-ECDSA-AES128-GCM-SHA256") != WOLFSSL_SUCCESS) {
+        return false;
+    }
+
+#ifdef HAVE_MAX_FRAGMENT
+    wolfSSL_CTX_UseMaxFragment(_ctx, WOLFSSL_MFL_2_10);
+#endif
+
+#ifdef HAVE_SUPPORTED_CURVES
+    if (wolfSSL_CTX_UseSupportedCurve(_ctx, WOLFSSL_ECC_SECP256R1) != WOLFSSL_SUCCESS) {
+        return false;
+    }
+#endif
 
     wolfSSL_CTX_set_verify(_ctx, SSL_VERIFY_PEER, NULL);
     wolfSSL_SetIOSend(_ctx, iotempower_wolfssl_send);
@@ -135,11 +149,13 @@ bool IoTempowerWolfsslTransport::startTls(const char* host) {
             reinterpret_cast<const unsigned char*>(_ca_cert),
             static_cast<long>(strlen(_ca_cert)),
             SSL_FILETYPE_PEM) != WOLFSSL_SUCCESS) {
+        Serial.printf("wolfSSL CA load failed, heap=%u\n", ESP.getFreeHeap());
         return false;
     }
 
     _ssl = wolfSSL_new(_ctx);
     if (!_ssl) {
+        Serial.printf("wolfSSL session allocation failed, heap=%u\n", ESP.getFreeHeap());
         return false;
     }
 
@@ -161,11 +177,14 @@ bool IoTempowerWolfsslTransport::startTls(const char* host) {
 
         int err = wolfSSL_get_error(_ssl, ret);
         if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
+            Serial.printf("wolfSSL_connect failed ret=%d err=%d heap=%u\n",
+                ret, err, ESP.getFreeHeap());
             return false;
         }
         delay(1);
     }
 
+    Serial.printf("wolfSSL_connect timed out, heap=%u\n", ESP.getFreeHeap());
     return false;
 }
 
@@ -239,9 +258,12 @@ int IoTempowerWolfsslTransport::rawRead(uint8_t* buf, size_t size) {
 }
 
 void IoTempowerWolfsslTransport::cleanupTls() {
+    bool was_connected = _tls_connected;
     _tls_connected = false;
     if (_ssl) {
-        wolfSSL_shutdown(_ssl);
+        if (was_connected) {
+            wolfSSL_shutdown(_ssl);
+        }
         wolfSSL_free(_ssl);
         _ssl = NULL;
     }
