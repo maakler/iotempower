@@ -21,6 +21,10 @@ class IoTempowerWolfsslTransport : public espMqttClientInternals::Transport {
         ~IoTempowerWolfsslTransport();
 
         void setCACert(const char* ca_cert);
+        void setPreSharedKey(
+            const char* identity,
+            const unsigned char* key,
+            unsigned int key_len);
 
         bool connect(IPAddress ip, uint16_t port) override;
         bool connect(const char* host, uint16_t port) override;
@@ -42,6 +46,10 @@ class IoTempowerWolfsslTransport : public espMqttClientInternals::Transport {
         WOLFSSL_CTX* _ctx;
         WOLFSSL* _ssl;
         const char* _ca_cert;
+        const char* _psk_identity;
+        const unsigned char* _psk_key;
+        unsigned int _psk_key_len;
+        bool _psk_enabled;
         bool _tls_connected;
 };
 
@@ -65,10 +73,45 @@ static int iotempower_wolfssl_recv(WOLFSSL* ssl, char* data, int size, void* ctx
         static_cast<size_t>(size));
 }
 
+static bool iotempower_wolfssl_initialized = false;
+static const char* iotempower_wolfssl_psk_identity = NULL;
+static const unsigned char* iotempower_wolfssl_psk_key = NULL;
+static unsigned int iotempower_wolfssl_psk_key_len = 0;
+
+static unsigned int iotempower_wolfssl_psk_client_cb(
+        WOLFSSL* ssl,
+        const char* hint,
+        char* identity,
+        unsigned int identity_max_len,
+        unsigned char* key,
+        unsigned int key_max_len) {
+    (void)ssl;
+    (void)hint;
+    if (!identity || !key || !iotempower_wolfssl_psk_identity ||
+            !iotempower_wolfssl_psk_key || iotempower_wolfssl_psk_key_len == 0) {
+        return 0;
+    }
+
+    size_t identity_len = strlen(iotempower_wolfssl_psk_identity);
+    if (identity_len + 1 > identity_max_len ||
+            iotempower_wolfssl_psk_key_len > key_max_len) {
+        return 0;
+    }
+
+    memcpy(identity, iotempower_wolfssl_psk_identity, identity_len);
+    identity[identity_len] = '\0';
+    memcpy(key, iotempower_wolfssl_psk_key, iotempower_wolfssl_psk_key_len);
+    return iotempower_wolfssl_psk_key_len;
+}
+
 IoTempowerWolfsslTransport::IoTempowerWolfsslTransport()
     : _ctx(NULL),
       _ssl(NULL),
       _ca_cert(NULL),
+      _psk_identity(NULL),
+      _psk_key(NULL),
+      _psk_key_len(0),
+      _psk_enabled(false),
       _tls_connected(false) {
 }
 
@@ -78,6 +121,22 @@ IoTempowerWolfsslTransport::~IoTempowerWolfsslTransport() {
 
 void IoTempowerWolfsslTransport::setCACert(const char* ca_cert) {
     _ca_cert = ca_cert;
+    _psk_enabled = false;
+}
+
+void IoTempowerWolfsslTransport::setPreSharedKey(
+        const char* identity,
+        const unsigned char* key,
+        unsigned int key_len) {
+    _psk_identity = identity;
+    _psk_key = key;
+    _psk_key_len = key_len;
+    _psk_enabled = identity && *identity && key && key_len > 0;
+    if (_psk_enabled) {
+        iotempower_wolfssl_psk_identity = identity;
+        iotempower_wolfssl_psk_key = key;
+        iotempower_wolfssl_psk_key_len = key_len;
+    }
 }
 
 bool IoTempowerWolfsslTransport::connect(IPAddress ip, uint16_t port) {
@@ -88,7 +147,7 @@ bool IoTempowerWolfsslTransport::connect(IPAddress ip, uint16_t port) {
 
 bool IoTempowerWolfsslTransport::connect(const char* host, uint16_t port) {
     stop();
-    if (!host || !*host || !_ca_cert || !*_ca_cert) {
+    if (!host || !*host || (!_psk_enabled && (!_ca_cert || !*_ca_cert))) {
         return false;
     }
     if (!connectTcp(host, port)) {
@@ -112,38 +171,58 @@ bool IoTempowerWolfsslTransport::connectTcp(const char* host, uint16_t port) {
 }
 
 bool IoTempowerWolfsslTransport::startTls(const char* host) {
-    if (wolfSSL_Init() != WOLFSSL_SUCCESS) {
-        return false;
+    if (!iotempower_wolfssl_initialized) {
+        if (wolfSSL_Init() != WOLFSSL_SUCCESS) {
+            Serial.printf("wolfSSL init failed, heap=%u\n", ESP.getFreeHeap());
+            return false;
+        }
+        iotempower_wolfssl_initialized = true;
     }
 
     WOLFSSL_METHOD* method = wolfTLSv1_2_client_method();
     if (!method) {
+        Serial.printf("wolfSSL TLS 1.2 method unavailable, heap=%u\n", ESP.getFreeHeap());
         return false;
     }
 
     _ctx = wolfSSL_CTX_new(method);
     if (!_ctx) {
+        Serial.printf("wolfSSL context allocation failed, heap=%u\n", ESP.getFreeHeap());
         return false;
     }
 
-    if (wolfSSL_CTX_set_cipher_list(_ctx, "ECDHE-ECDSA-AES128-GCM-SHA256") != WOLFSSL_SUCCESS) {
+#ifdef MQTT_TLS_MODE_PSK
+    if (wolfSSL_CTX_set_cipher_list(_ctx, "PSK-AES128-GCM-SHA256") != WOLFSSL_SUCCESS) {
+        Serial.printf("wolfSSL PSK cipher unavailable, heap=%u\n", ESP.getFreeHeap());
         return false;
     }
+#else
+    if (wolfSSL_CTX_set_cipher_list(_ctx, "ECDHE-ECDSA-AES128-GCM-SHA256") != WOLFSSL_SUCCESS) {
+        Serial.printf("wolfSSL ECDSA cipher unavailable, heap=%u\n", ESP.getFreeHeap());
+        return false;
+    }
+#endif
 
 #ifdef HAVE_MAX_FRAGMENT
     wolfSSL_CTX_UseMaxFragment(_ctx, WOLFSSL_MFL_2_10);
 #endif
 
-#ifdef HAVE_SUPPORTED_CURVES
+#if defined(HAVE_SUPPORTED_CURVES) && !defined(MQTT_TLS_MODE_PSK)
     if (wolfSSL_CTX_UseSupportedCurve(_ctx, WOLFSSL_ECC_SECP256R1) != WOLFSSL_SUCCESS) {
+        Serial.printf("wolfSSL supported-curve setup failed, heap=%u\n", ESP.getFreeHeap());
         return false;
     }
 #endif
 
+#ifndef MQTT_TLS_MODE_PSK
     wolfSSL_CTX_set_verify(_ctx, SSL_VERIFY_PEER, NULL);
+#endif
     wolfSSL_SetIOSend(_ctx, iotempower_wolfssl_send);
     wolfSSL_SetIORecv(_ctx, iotempower_wolfssl_recv);
 
+#ifdef MQTT_TLS_MODE_PSK
+    wolfSSL_CTX_set_psk_client_callback(_ctx, iotempower_wolfssl_psk_client_cb);
+#else
     if (wolfSSL_CTX_load_verify_buffer(
             _ctx,
             reinterpret_cast<const unsigned char*>(_ca_cert),
@@ -152,6 +231,7 @@ bool IoTempowerWolfsslTransport::startTls(const char* host) {
         Serial.printf("wolfSSL CA load failed, heap=%u\n", ESP.getFreeHeap());
         return false;
     }
+#endif
 
     _ssl = wolfSSL_new(_ctx);
     if (!_ssl) {
@@ -161,10 +241,15 @@ bool IoTempowerWolfsslTransport::startTls(const char* host) {
 
     wolfSSL_SetIOReadCtx(_ssl, this);
     wolfSSL_SetIOWriteCtx(_ssl, this);
+#ifdef MQTT_TLS_MODE_PSK
+    wolfSSL_set_psk_client_callback(_ssl, iotempower_wolfssl_psk_client_cb);
+#endif
+#ifndef MQTT_TLS_MODE_PSK
     wolfSSL_check_domain_name(_ssl, host);
 
 #ifdef HAVE_SNI
     wolfSSL_UseSNI(_ssl, WOLFSSL_SNI_HOST_NAME, host, static_cast<unsigned short>(strlen(host)));
+#endif
 #endif
 
     unsigned long deadline = millis() + 15000;
@@ -300,6 +385,14 @@ IoTempowerWolfsslMqttClient::~IoTempowerWolfsslMqttClient() {
 
 IoTempowerWolfsslMqttClient& IoTempowerWolfsslMqttClient::setCACert(const char* ca_cert) {
     _client->setCACert(ca_cert);
+    return *this;
+}
+
+IoTempowerWolfsslMqttClient& IoTempowerWolfsslMqttClient::setPreSharedKey(
+        const char* identity,
+        const unsigned char* key,
+        unsigned int key_len) {
+    _client->setPreSharedKey(identity, key, key_len);
     return *this;
 }
 

@@ -78,6 +78,31 @@ mqtt_write_acl_file() {
     } > "$acl_file"
 }
 
+mqtt_write_psk_file() {
+    local psk_file="$1"
+    local psk_hex="${IOTEMPOWER_MQTT_PSK_HEX,,}"
+    local old_umask=""
+
+    [[ "$IOTEMPOWER_MQTT_PSK_IDENTITY" && "$psk_hex" ]] \
+        || mqtt_fail "MQTT TLS PSK mode requires IOTEMPOWER_MQTT_PSK_IDENTITY and IOTEMPOWER_MQTT_PSK_HEX. Aborting."
+    [[ "$IOTEMPOWER_MQTT_PSK_IDENTITY" != *[[:space:]:]* ]] \
+        || mqtt_fail "MQTT TLS PSK identity may not contain whitespace or colon. Aborting."
+    [[ "$psk_hex" =~ ^([0-9a-f]{2})+$ && ${#psk_hex} -ge 32 ]] \
+        || mqtt_fail "IOTEMPOWER_MQTT_PSK_HEX must be even-length hexadecimal with at least 16 bytes. Aborting."
+
+    old_umask="$(umask)"
+    umask 077
+    printf '%s:%s\n' "$IOTEMPOWER_MQTT_PSK_IDENTITY" "$psk_hex" > "$psk_file" || {
+        umask "$old_umask"
+        return 1
+    }
+    chmod 600 "$psk_file" || {
+        umask "$old_umask"
+        return 1
+    }
+    umask "$old_umask"
+}
+
 mqtt_node_topic_from_path() {
     local system_dir="$1"
     local node_conf="$2"
@@ -216,6 +241,13 @@ while true; do
     echo "Listening on $IOTEMPOWER_MQTT_HOST."
     [[ "$IOTEMPOWER_MQTT_HOST2" ]] && echo "Also listening on $IOTEMPOWER_MQTT_HOST2."
 
+    mqtt_tls_mode="${IOTEMPOWER_MQTT_TLS_MODE:-cert}"
+    [[ "$mqtt_tls_mode" == "cert" || "$mqtt_tls_mode" == "psk" ]] \
+        || mqtt_fail "Unsupported MQTT TLS mode: $mqtt_tls_mode"
+    if [[ "$mqtt_tls_mode" == "psk" && "$IOTEMPOWER_MQTT_USE_TLS" != 1 ]]; then
+        mqtt_fail "MQTT TLS PSK mode requires TLS. Aborting."
+    fi
+
     mqtt_auth_enabled=false
     if [[ "$IOTEMPOWER_MQTT_USER" || "$IOTEMPOWER_MQTT_PW" ]]; then
         mqtt_auth_enabled=true
@@ -259,12 +291,32 @@ EOF
     fi
 
     if [[ "$IOTEMPOWER_MQTT_USE_TLS" == 1 ]]; then
-        if [[ ! "$IOTEMPOWER_MQTT_CERT_FOLDER" ]]; then
+        if [[ "$mqtt_tls_mode" == "psk" ]]; then
+            mqtt_write_psk_file "$APTEMP/psk_file" \
+                || mqtt_fail "Failed to generate Mosquitto PSK file. Aborting."
+            cat << EOF >> "$APTEMP/mosquitto.conf"
+# TLS-PSK
+listener 8883 $IOTEMPOWER_MQTT_HOST
+psk_hint iotempower
+psk_file $APTEMP/psk_file
+tls_version tlsv1.2
+ciphers PSK-AES128-GCM-SHA256
+EOF
+            if [[ "$IOTEMPOWER_MQTT_HOST2" ]]; then
+                cat << EOF >> "$APTEMP/mosquitto.conf"
+listener 8883 $IOTEMPOWER_MQTT_HOST2
+psk_hint iotempower
+psk_file $APTEMP/psk_file
+tls_version tlsv1.2
+ciphers PSK-AES128-GCM-SHA256
+EOF
+            fi
+        elif [[ ! "$IOTEMPOWER_MQTT_CERT_FOLDER" ]]; then
             echo "MQTT TLS enabled, but no certificate folder set. Aborting." 1>&2
             exit 1
-        fi
+        else
     # IOTEMPOWER_MQTT_CERT_FOLDER's default is set in read_system_config
-        cat << EOF >> "$APTEMP/mosquitto.conf"
+            cat << EOF >> "$APTEMP/mosquitto.conf"
 # TLS
 listener 8883 $IOTEMPOWER_MQTT_HOST
 cafile $IOTEMPOWER_MQTT_CERT_FOLDER/ca.crt
@@ -272,14 +324,15 @@ certfile $IOTEMPOWER_MQTT_CERT_FOLDER/server.crt
 keyfile $IOTEMPOWER_MQTT_CERT_FOLDER/server.key
 require_certificate false  
 EOF
-        if [[ "$IOTEMPOWER_MQTT_HOST2" ]]; then
-            cat << EOF >> "$APTEMP/mosquitto.conf"
+            if [[ "$IOTEMPOWER_MQTT_HOST2" ]]; then
+                cat << EOF >> "$APTEMP/mosquitto.conf"
 listener 8883 $IOTEMPOWER_MQTT_HOST2
 cafile $IOTEMPOWER_MQTT_CERT_FOLDER/ca.crt
 certfile $IOTEMPOWER_MQTT_CERT_FOLDER/server.crt
 keyfile $IOTEMPOWER_MQTT_CERT_FOLDER/server.key
 require_certificate false
 EOF
+            fi
         fi
     else
         cat << EOF >> "$APTEMP/mosquitto.conf"

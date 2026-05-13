@@ -12,7 +12,13 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
-def _auth_system(tmp_path: Path, fakebin: Path, *, tls: bool = True) -> tuple[Path, Path, dict[str, str]]:
+def _auth_system(
+    tmp_path: Path,
+    fakebin: Path,
+    *,
+    tls: bool = True,
+    psk: bool = False,
+) -> tuple[Path, Path, dict[str, str]]:
     system_dir = tmp_path / "auth-system"
     cert_dir = system_dir / "certs"
     local_dir = tmp_path / "local"
@@ -24,10 +30,18 @@ def _auth_system(tmp_path: Path, fakebin: Path, *, tls: bool = True) -> tuple[Pa
     (cert_dir / "server.crt").write_text("test-server-cert\n", encoding="utf-8")
     (cert_dir / "server.key").write_text("test-server-key\n", encoding="utf-8")
     (node_dir / "node.conf").write_text('board="wemos d1 mini"\n', encoding="utf-8")
+    psk_config = (
+        'IOTEMPOWER_MQTT_TLS_MODE="psk"\n'
+        'IOTEMPOWER_MQTT_PSK_IDENTITY="iotempower-node"\n'
+        'IOTEMPOWER_MQTT_PSK_HEX="00112233445566778899aabbccddeeff"\n'
+        if psk
+        else ""
+    )
     (system_dir / "system.conf").write_text(
         f'IOTEMPOWER_MQTT_HOST="127.0.0.1"\n'
         f"IOTEMPOWER_MQTT_USE_TLS={1 if tls else 0}\n"
         f'IOTEMPOWER_MQTT_CERT_FOLDER="{cert_dir}"\n'
+        f"{psk_config}"
         'IOTEMPOWER_MQTT_USER="homeassistant"\n'
         'IOTEMPOWER_MQTT_PW="secretpw"\n'
         'IOTEMPOWER_MQTT_DISCOVERY_PREFIX="iotempower"\n',
@@ -75,6 +89,8 @@ def _fake_mqtt_clients(fakebin: Path) -> Path:
         '        printf "xdg=%s\\n" "${XDG_CONFIG_HOME:-}"\n'
         '        printf "env_user=%s\\n" "${IOTEMPOWER_MQTT_USER:-}"\n'
         '        printf "env_pw=%s\\n" "${IOTEMPOWER_MQTT_PW:-}"\n'
+        '        printf "env_psk_identity=%s\\n" "${IOTEMPOWER_MQTT_PSK_IDENTITY:-}"\n'
+        '        printf "env_psk_hex=%s\\n" "${IOTEMPOWER_MQTT_PSK_HEX:-}"\n'
         '        if [[ -d "${XDG_CONFIG_HOME:-}" ]]; then\n'
         '            printf "dir_mode=%s\\n" "$(stat -c "%a" "$XDG_CONFIG_HOME")"\n'
         '        fi\n'
@@ -118,6 +134,8 @@ def _assert_private_auth_config(report_file: Path, expected_client: str, *, clea
     assert data["client"] == expected_client
     assert data["env_user"] == ""
     assert data["env_pw"] == ""
+    assert data["env_psk_identity"] == ""
+    assert data["env_psk_hex"] == ""
     assert data["dir_mode"] == "700"
     assert data["config"] == str(config_dir / expected_client)
     assert data["config_mode"] == "600"
@@ -147,6 +165,50 @@ def _assert_client_uses_tls_auth_config(
     assert "secretpw" not in args
     assert "1883" not in args
     _assert_private_auth_config(report_file, expected_client, cleaned_up=cleaned_up)
+
+
+def _assert_client_uses_tls_psk_auth_config(
+    args_file: Path,
+    report_file: Path,
+    expected_client: str,
+    *,
+    cleaned_up: bool = True,
+) -> None:
+    args = args_file.read_text(encoding="utf-8").splitlines()
+    data, config_body = _read_config_report(report_file)
+    config_dir = Path(data["xdg"])
+
+    assert args[args.index("-p") + 1] == "8883"
+    assert "--cafile" not in args
+    assert "--psk" not in args
+    assert "--psk-identity" not in args
+    assert "00112233445566778899aabbccddeeff" not in args
+    assert "iotempower-node" not in args
+    assert "-u" not in args
+    assert "--username" not in args
+    assert "homeassistant" not in args
+    assert "-P" not in args
+    assert "--pw" not in args
+    assert "secretpw" not in args
+    assert "1883" not in args
+    assert data["client"] == expected_client
+    assert data["env_user"] == ""
+    assert data["env_pw"] == ""
+    assert data["env_psk_identity"] == ""
+    assert data["env_psk_hex"] == ""
+    assert data["dir_mode"] == "700"
+    assert data["config"] == str(config_dir / expected_client)
+    assert data["config_mode"] == "600"
+    assert config_body == [
+        "--username homeassistant",
+        "--pw secretpw",
+        "--psk-identity iotempower-node",
+        "--psk 00112233445566778899aabbccddeeff",
+    ]
+    if cleaned_up:
+        assert not config_dir.exists()
+    else:
+        assert config_dir.exists()
 
 
 def test_mqtt_broker_auth_generates_password_acl_and_tls_only_config(tmp_path):
@@ -187,6 +249,44 @@ def test_mqtt_broker_auth_generates_password_acl_and_tls_only_config(tmp_path):
     assert password_file == "homeassistant:hashed:secretpw\n"
     assert passwd_args == ["-c", str(mosquitto_dir / "password_file.tmp"), "homeassistant"]
     assert "secretpw" not in passwd_args
+
+
+def test_mqtt_broker_tls_psk_generates_psk_listener_and_keeps_acl_auth(tmp_path):
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    _fake_broker_tools(fakebin)
+    system_dir, _, env = _auth_system(tmp_path, fakebin, psk=True)
+    env["FAKE_MOSQUITTO_ARGS"] = str(tmp_path / "mosquitto.args")
+    env["FAKE_PASSWD_ARGS"] = str(tmp_path / "passwd.args")
+
+    result = subprocess.run(
+        ["timeout", "1", "mqtt_broker", "lo", "127.0.0.1"],
+        cwd=system_dir,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    assert result.returncode in {0, 124}
+    mosquitto_dir = tmp_path / "local" / "tmp" / "mosquitto"
+    conf = (mosquitto_dir / "mosquitto.conf").read_text(encoding="utf-8")
+    psk_file = mosquitto_dir / "psk_file"
+    assert "allow_anonymous false" in conf
+    assert "listener 8883 127.0.0.1" in conf
+    assert "psk_hint iotempower" in conf
+    assert f"psk_file {psk_file}" in conf
+    assert "tls_version tlsv1.2" in conf
+    assert "ciphers PSK-AES128-GCM-SHA256" in conf
+    assert "cafile" not in conf
+    assert "certfile" not in conf
+    assert "keyfile" not in conf
+    assert "listener 1883" not in conf
+    assert psk_file.read_text(encoding="utf-8") == (
+        "iotempower-node:00112233445566778899aabbccddeeff\n"
+    )
+    assert oct(psk_file.stat().st_mode & 0o777) == "0o600"
 
 
 def test_mqtt_broker_acl_generation_does_not_source_node_conf(tmp_path):
@@ -337,6 +437,41 @@ def test_mqtt_auth_requires_tls(tmp_path):
     assert "MQTT auth requires TLS" in result.stderr
 
 
+def test_mqtt_tls_psk_mode_requires_tls(tmp_path):
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    _fake_broker_tools(fakebin)
+    system_dir, _, env = _auth_system(tmp_path, fakebin, tls=False, psk=True)
+    env["FAKE_MOSQUITTO_ARGS"] = str(tmp_path / "mosquitto.args")
+    env["FAKE_PASSWD_ARGS"] = str(tmp_path / "passwd.args")
+
+    broker_result = subprocess.run(
+        ["mqtt_broker", "lo", "127.0.0.1"],
+        cwd=system_dir,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert broker_result.returncode != 0
+    assert "MQTT TLS PSK mode requires TLS" in broker_result.stderr
+
+    args_file = _fake_mqtt_clients(fakebin)
+    env["FAKE_MQTT_ARGS"] = str(args_file)
+    helper_result = subprocess.run(
+        ["mqtt_send", "/allowed-node/probe", "hello"],
+        cwd=system_dir,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert helper_result.returncode != 0
+    assert "MQTT TLS PSK mode requires TLS" in helper_result.stderr
+
+
 def test_mqtt_helpers_include_tls_auth_options(tmp_path):
     fakebin = tmp_path / "fakebin"
     fakebin.mkdir()
@@ -364,6 +499,22 @@ def test_mqtt_helpers_include_tls_auth_options(tmp_path):
     env["FAKE_MQTT_OUTPUT"] = "iotempower/_cfg_/test-node/ip 192.0.2.55"
     subprocess.run(["get_ips", "test-node"], cwd=system_dir, env=env, check=True)
     _assert_client_uses_tls_auth_config(args_file, cert_dir, report_file, "mosquitto_sub")
+
+
+def test_mqtt_helpers_hide_tls_psk_and_auth_options(tmp_path):
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    args_file = _fake_mqtt_clients(fakebin)
+    report_file = tmp_path / "mqtt-client.report"
+    system_dir, _, env = _auth_system(tmp_path, fakebin, psk=True)
+    env["FAKE_MQTT_ARGS"] = str(args_file)
+    env["FAKE_MQTT_CONFIG_REPORT"] = str(report_file)
+
+    subprocess.run(["mqtt_send", "/allowed-node/probe", "hello"], cwd=system_dir, env=env, check=True)
+    _assert_client_uses_tls_psk_auth_config(args_file, report_file, "mosquitto_pub")
+
+    subprocess.run(["mqtt_listen", "/allowed-node/probe"], cwd=system_dir, env=env, check=True)
+    _assert_client_uses_tls_psk_auth_config(args_file, report_file, "mosquitto_sub")
 
 
 def test_mqtt_helper_cleans_private_config_after_client_failure(tmp_path):
@@ -487,12 +638,18 @@ def test_prepare_build_dir_escapes_generated_mqtt_and_wifi_config(tmp_path):
     config_h = (node_dir / "build" / "src" / "config.h").read_text(encoding="utf-8")
     wifi_config_h = (node_dir / "build" / "src" / "wifi-config.h").read_text(encoding="utf-8")
     platformio_libs = (node_dir / "build" / "platformio-libs.ini").read_text(encoding="utf-8")
+    devices_h = (node_dir / "build" / "src" / "devices_generated.h").read_text(encoding="utf-8")
     assert '#define mqtt_server "broker\\"host"' in config_h
     assert '#define mqtt_user "user\\"name"' in config_h
     assert '#define mqtt_password "pw\\\\with\\"quotes"' in config_h
     assert '#define mqtt_discovery_prefix "disc\\"prefix"' in config_h
     assert '#define WIFI_PASSWORD "wifi\\"pass\\\\test"' in wifi_config_h
     assert "wolfSSL" not in platformio_libs
+    assert "olikraus/U8g2" in platformio_libs
+    assert "tonykambo/LiquidCrystal_I2C" in platformio_libs
+    assert "#define IOTEMPOWER_COMMAND_INPUT" in devices_h
+    assert "#define IOTEMPOWER_COMMAND_DISPLAY" in devices_h
+    assert "#define IOTEMPOWER_COMMAND_SLEEP_MGR" in devices_h
 
 
 def test_prepare_build_dir_generates_wolfssl_backend_macro(tmp_path):
@@ -534,11 +691,128 @@ def test_prepare_build_dir_generates_wolfssl_backend_macro(tmp_path):
 
     config_h = (node_dir / "build" / "src" / "config.h").read_text(encoding="utf-8")
     platformio_libs = (node_dir / "build" / "platformio-libs.ini").read_text(encoding="utf-8")
+    devices_h = (node_dir / "build" / "src" / "devices_generated.h").read_text(encoding="utf-8")
+    build_src = node_dir / "build" / "src"
     assert "#define MQTT_USE_TLS" in config_h
     assert "#define MQTT_TLS_BACKEND_WOLFSSL" in config_h
     assert "https://github.com/wolfSSL/Arduino-wolfSSL.git#5.8.4" in platformio_libs
     assert "-DWOLFSSL_USER_SETTINGS" in platformio_libs
     assert "-DWOLFSSL_NO_TLS13" in platformio_libs
+    assert "-DNO_SESSION_CACHE" in platformio_libs
+    assert "-DEMC_RX_BUFFER_SIZE=512" in platformio_libs
+    assert "-DEMC_TX_BUFFER_SIZE=512" in platformio_libs
+    assert "-DIOTEMPOWER_NO_OTA_DISPLAY" in platformio_libs
+    assert "olikraus/U8g2" not in platformio_libs
+    assert "tonykambo/LiquidCrystal_I2C" not in platformio_libs
+    assert "#define IOTEMPOWER_COMMAND_OUTPUT" in devices_h
+    assert "#define IOTEMPOWER_COMMAND_INPUT" not in devices_h
+    assert "#define IOTEMPOWER_COMMAND_DISPLAY" not in devices_h
+    assert "#define IOTEMPOWER_COMMAND_SLEEP_MGR" not in devices_h
+    assert not (build_src / "dev_display_i2c.h").exists()
+    assert not (build_src / "dev_input_digital.h").exists()
+    assert not (build_src / "dev_sleep_mgr.h").exists()
+
+
+def test_prepare_build_dir_generates_wolfssl_psk_config_without_ca(tmp_path):
+    system_dir = tmp_path / "system"
+    node_dir = system_dir / "wolfssl-psk-node"
+    local_dir = tmp_path / "local"
+    node_dir.mkdir(parents=True)
+    local_dir.mkdir()
+    (system_dir / "system.conf").write_text(
+        'IOTEMPOWER_AP_NAME="review-ap"\n'
+        'IOTEMPOWER_AP_PASSWORD="review-pass"\n'
+        'IOTEMPOWER_AP_IP="192.0.2.1"\n'
+        'IOTEMPOWER_MQTT_HOST="broker"\n'
+        "IOTEMPOWER_MQTT_USE_TLS=1\n"
+        'IOTEMPOWER_MQTT_TLS_BACKEND="wolfssl"\n'
+        'IOTEMPOWER_MQTT_TLS_MODE="psk"\n'
+        'IOTEMPOWER_MQTT_PSK_IDENTITY="iotempower-node"\n'
+        'IOTEMPOWER_MQTT_PSK_HEX="00112233445566778899AABBCCDDEEFF"\n',
+        encoding="utf-8",
+    )
+    (node_dir / "node.conf").write_text(
+        'board="wemos d1 mini"\ntopic="wolfssl/psk"\n',
+        encoding="utf-8",
+    )
+    (node_dir / "setup.cpp").write_text("void setup_iot() {}\n", encoding="utf-8")
+    (node_dir / "key.txt").write_text("0" * 64 + "\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "IOTEMPOWER_ACTIVE": "yes",
+            "IOTEMPOWER_ROOT": str(REPO_ROOT),
+            "IOTEMPOWER_LOCAL": str(local_dir),
+            "IOTEMPOWER_COMPILE_CACHE": str(tmp_path / "compile_cache"),
+        }
+    )
+
+    subprocess.run([str(REPO_ROOT / "bin" / "prepare_build_dir")], cwd=node_dir, env=env, check=True)
+
+    config_h = (node_dir / "build" / "src" / "config.h").read_text(encoding="utf-8")
+    platformio_libs = (node_dir / "build" / "platformio-libs.ini").read_text(encoding="utf-8")
+    assert "#define MQTT_TLS_MODE_PSK" in config_h
+    assert '#define mqtt_psk_identity "iotempower-node"' in config_h
+    assert "#define IOTEMPOWER_MQTT_PSK_KEY_DEFINED" in config_h
+    assert "static const unsigned char mqtt_psk_key[] = {" in config_h
+    assert "#define mqtt_psk_key_len 16" in config_h
+    assert "mqtt_ca_cert" not in config_h
+    assert "-DNO_PSK" not in platformio_libs
+    assert "-DWOLFSSL_STATIC_PSK" in platformio_libs
+
+
+def test_prepare_build_dir_wolfssl_keeps_explicit_default_opt_out_devices(tmp_path):
+    system_dir = tmp_path / "system"
+    node_dir = system_dir / "wolfssl-explicit-node"
+    cert_dir = system_dir / "certs"
+    local_dir = tmp_path / "local"
+    node_dir.mkdir(parents=True)
+    cert_dir.mkdir()
+    local_dir.mkdir()
+    (cert_dir / "ca.crt").write_text(
+        "-----BEGIN CERTIFICATE-----\nWOLFSSLTEST\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    (system_dir / "system.conf").write_text(
+        'IOTEMPOWER_AP_NAME="review-ap"\n'
+        'IOTEMPOWER_AP_PASSWORD="review-pass"\n'
+        'IOTEMPOWER_AP_IP="192.0.2.1"\n'
+        'IOTEMPOWER_MQTT_HOST="broker"\n'
+        "IOTEMPOWER_MQTT_USE_TLS=1\n"
+        'IOTEMPOWER_MQTT_TLS_BACKEND="wolfssl"\n'
+        f'IOTEMPOWER_MQTT_CERT_FOLDER="{cert_dir}"\n',
+        encoding="utf-8",
+    )
+    (node_dir / "node.conf").write_text(
+        'board="wemos d1 mini"\ntopic="wolfssl/explicit"\n',
+        encoding="utf-8",
+    )
+    (node_dir / "setup.cpp").write_text(
+        'input(button, D3, "released", "pressed");\n'
+        "display(screen);\n"
+        "sleep_mgr(user_sleep);\n",
+        encoding="utf-8",
+    )
+    (node_dir / "key.txt").write_text("0" * 64 + "\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "IOTEMPOWER_ACTIVE": "yes",
+            "IOTEMPOWER_ROOT": str(REPO_ROOT),
+            "IOTEMPOWER_LOCAL": str(local_dir),
+            "IOTEMPOWER_COMPILE_CACHE": str(tmp_path / "compile_cache"),
+        }
+    )
+
+    subprocess.run([str(REPO_ROOT / "bin" / "prepare_build_dir")], cwd=node_dir, env=env, check=True)
+
+    platformio_libs = (node_dir / "build" / "platformio-libs.ini").read_text(encoding="utf-8")
+    devices_h = (node_dir / "build" / "src" / "devices_generated.h").read_text(encoding="utf-8")
+    assert "#define IOTEMPOWER_COMMAND_INPUT" in devices_h
+    assert "#define IOTEMPOWER_COMMAND_DISPLAY" in devices_h
+    assert "#define IOTEMPOWER_COMMAND_SLEEP_MGR" in devices_h
+    assert "olikraus/U8g2" in platformio_libs
+    assert "tonykambo/LiquidCrystal_I2C" in platformio_libs
 
 
 def test_prepare_build_dir_rejects_partial_mqtt_credentials(tmp_path):

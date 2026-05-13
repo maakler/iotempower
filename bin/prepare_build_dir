@@ -55,6 +55,19 @@ c_string_literal() {
     printf '%s' "$value"
 }
 
+hex_to_c_array() {
+    local hex="${1,,}"
+    local i=0
+    local sep=""
+
+    [[ "$hex" =~ ^([0-9a-f]{2})+$ ]] || return 1
+    while (( i < ${#hex} )); do
+        printf '%s0x%s' "$sep" "${hex:i:2}"
+        sep=", "
+        i=$((i + 2))
+    done
+}
+
 copy_type_through_base() {
     # $1: source directory
     # $2: type (folder to copy)
@@ -96,20 +109,40 @@ if [[ -e "node.conf" ]]; then  # started from node-directory
     source "$IOTEMPOWER_ROOT/bin/read_node_config"
     node_type="$board"
     mqtt_tls_backend="${IOTEMPOWER_MQTT_TLS_BACKEND:-default}"
+    mqtt_tls_mode="${IOTEMPOWER_MQTT_TLS_MODE:-cert}"
 
     if [[ "$mqtt_tls_backend" != "default" && "$mqtt_tls_backend" != "wolfssl" ]]; then
         echo "Unsupported MQTT TLS backend: $mqtt_tls_backend" 1>&2
+        exit 1
+    fi
+    if [[ "$mqtt_tls_mode" != "cert" && "$mqtt_tls_mode" != "psk" ]]; then
+        echo "Unsupported MQTT TLS mode: $mqtt_tls_mode" 1>&2
         exit 1
     fi
     if [[ "$mqtt_tls_backend" == "wolfssl" && "$IOTEMPOWER_MQTT_USE_TLS" != 1 ]]; then
         echo "MQTT wolfSSL backend requires TLS. Aborting." 1>&2
         exit 1
     fi
+    if [[ "$mqtt_tls_mode" == "psk" && "$mqtt_tls_backend" != "wolfssl" ]]; then
+        echo "MQTT TLS PSK mode requires the wolfSSL backend. Aborting." 1>&2
+        exit 1
+    fi
     mqtt_extra_build_flags=""
     mqtt_extra_lib_deps=""
+    mqtt_no_default_input=""
+    mqtt_no_default_display=""
+    mqtt_no_auto_sleep_mgr=""
     if [[ "$mqtt_tls_backend" == "wolfssl" ]]; then
-        mqtt_extra_build_flags=$'-DWOLFSSL_USER_SETTINGS\n-DWOLFSSL_CLIENT_EXAMPLE\n-DWOLFSSL_NO_TLS13\n-DWOLFSSL_SMALL_STACK_EXTRA\n-DWOLFSSL_SMALL_STACK_CIPHERS\n-DNO_WOLFSSL_SERVER\n-DNO_PSK\n-DNO_RSA\n-DNO_ERROR_STRINGS'
+        mqtt_extra_build_flags=$'-DWOLFSSL_USER_SETTINGS\n-DWOLFSSL_CLIENT_EXAMPLE\n-DWOLFSSL_NO_TLS13\n-DWOLFSSL_SMALL_STACK_EXTRA\n-DWOLFSSL_SMALL_STACK_CIPHERS\n-DNO_WOLFSSL_SERVER\n-DNO_RSA\n-DNO_SESSION_CACHE\n-DNO_ERROR_STRINGS\n-DEMC_RX_BUFFER_SIZE=512\n-DEMC_TX_BUFFER_SIZE=512\n-DEMC_MIN_FREE_MEMORY=4096\n-DIOTEMPOWER_NO_DEFAULT_INPUT\n-DIOTEMPOWER_NO_DEFAULT_DISPLAY\n-DIOTEMPOWER_NO_AUTO_SLEEP_MGR\n-DIOTEMPOWER_NO_OTA_DISPLAY\n-DIOTEMPOWER_MAX_DEVICES=8\n-DIOTEMPOWER_MAX_SUBDEVICES=4\n-DIOTEMPOWER_MAX_STRLEN=96\n-DIOTEMPOWER_MAX_BUFLEN=512\n-DLOG_LINE_MAX_LEN=96\n-DIOTEMPOWER_DO_LATER_MAP_SIZE=16'
+        if [[ "$mqtt_tls_mode" == "psk" ]]; then
+            mqtt_extra_build_flags+=$'\n-DWOLFSSL_STATIC_PSK'
+        else
+            mqtt_extra_build_flags+=$'\n-DNO_PSK'
+        fi
         mqtt_extra_lib_deps="https://github.com/wolfSSL/Arduino-wolfSSL.git#5.8.4"
+        mqtt_no_default_input=1
+        mqtt_no_default_display=1
+        mqtt_no_auto_sleep_mgr=1
     fi
 
     if [[ "$mqtt_user" || "$mqtt_password" ]]; then
@@ -210,8 +243,31 @@ EOF
             echo '#define MQTT_TLS_BACKEND_WOLFSSL' >> "$fname.new"
         fi
 
-        # Add CA certificate to config.h
-        if [[ "$IOTEMPOWER_MQTT_CERT_FOLDER" ]]; then
+        if [[ "$mqtt_tls_mode" == "psk" ]]; then
+            if [[ ! "$IOTEMPOWER_MQTT_PSK_IDENTITY" || ! "$IOTEMPOWER_MQTT_PSK_HEX" ]]; then
+                echo "MQTT TLS PSK mode requires IOTEMPOWER_MQTT_PSK_IDENTITY and IOTEMPOWER_MQTT_PSK_HEX. Aborting." 1>&2
+                exit 1
+            fi
+            if [[ "$IOTEMPOWER_MQTT_PSK_IDENTITY" == *[[:space:]:]* ]]; then
+                echo "MQTT TLS PSK identity may not contain whitespace or colon. Aborting." 1>&2
+                exit 1
+            fi
+            if (( ${#IOTEMPOWER_MQTT_PSK_HEX} < 32 )) || ! psk_c_array="$(hex_to_c_array "$IOTEMPOWER_MQTT_PSK_HEX")"; then
+                echo "IOTEMPOWER_MQTT_PSK_HEX must be even-length hexadecimal with at least 16 bytes. Aborting." 1>&2
+                exit 1
+            fi
+            echo '#define MQTT_TLS_MODE_PSK' >> "$fname.new"
+            printf '#define mqtt_psk_identity "%s"\n' \
+                "$(c_string_literal "$IOTEMPOWER_MQTT_PSK_IDENTITY")" >> "$fname.new"
+            echo '#ifndef IOTEMPOWER_MQTT_PSK_KEY_DEFINED' >> "$fname.new"
+            echo '#define IOTEMPOWER_MQTT_PSK_KEY_DEFINED' >> "$fname.new"
+            printf 'static const unsigned char mqtt_psk_key[] = {%s};\n' \
+                "$psk_c_array" >> "$fname.new"
+            printf '#define mqtt_psk_key_len %d\n' \
+                "$(( ${#IOTEMPOWER_MQTT_PSK_HEX} / 2 ))" >> "$fname.new"
+            echo '#endif' >> "$fname.new"
+        elif [[ "$IOTEMPOWER_MQTT_CERT_FOLDER" ]]; then
+            # Add CA certificate to config.h
             cert_file="$IOTEMPOWER_MQTT_CERT_FOLDER/ca.crt"
             if [[ -e "$cert_file" ]]; then
                 {
@@ -281,6 +337,9 @@ EOF
     mkdir -p "$new_dir/src"
     commands=$(IOTEMPOWER_EXTRA_BUILD_FLAGS="$mqtt_extra_build_flags" \
         IOTEMPOWER_EXTRA_LIB_DEPS="$mqtt_extra_lib_deps" \
+        IOTEMPOWER_NO_DEFAULT_INPUT="$mqtt_no_default_input" \
+        IOTEMPOWER_NO_DEFAULT_DISPLAY="$mqtt_no_default_display" \
+        IOTEMPOWER_NO_AUTO_SLEEP_MGR="$mqtt_no_auto_sleep_mgr" \
         iot_grun python3 "$IOTEMPOWER_ROOT/bin/command_checker.py" \
         "$dest_dir/devices.ini" \
         "$dest_dir/src/setup.h" \

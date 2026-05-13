@@ -336,10 +336,12 @@ void id_blinker() {
     lasttime = currenttime;
 }
 
-// TODO: refactor this out so that it can be overwritten for m5 display
-#include <dev_display_i2c.h>
-Display* ota_display=NULL;
-bool ota_display_present = false;
+#ifndef IOTEMPOWER_NO_OTA_DISPLAY
+    // TODO: refactor this out so that it can be overwritten for m5 display
+    #include <dev_display_i2c.h>
+    Display* ota_display=NULL;
+    bool ota_display_present = false;
+#endif
 
 /**
  * @brief Initialize the Over-The-Air (OTA) update system
@@ -375,6 +377,7 @@ void setup_ota() {
     });
     ArduinoOTA.onEnd([]() { 
         Serial.println(F("\nOTA End, success."));
+        #ifndef IOTEMPOWER_NO_OTA_DISPLAY
         if(ota_display_present) {
             ota_display->i2c_start();
             ota_display->clear();
@@ -382,6 +385,7 @@ void setup_ota() {
             delay(100);
             ota_display->clear_bus();            
         }
+        #endif
     });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
         static int last_percent = -1;
@@ -397,6 +401,7 @@ void setup_ota() {
                 onboard_led_on();
             }
             #endif
+            #ifndef IOTEMPOWER_NO_OTA_DISPLAY
             if(ota_display_present) {
                 ota_display->clear();
                 ota_display->print(F("Adoption\nactive\n\nProgress:\n"));
@@ -404,6 +409,7 @@ void setup_ota() {
                 ota_display->print(s);
                 ota_display->measure();
             }
+            #endif
             last_percent = percent;
         }
     });
@@ -419,12 +425,14 @@ void setup_ota() {
             Serial.println(F("Receive Failed"));
         else if (error == OTA_END_ERROR)
             Serial.println(F("End Failed"));
+        #ifndef IOTEMPOWER_NO_OTA_DISPLAY
         if(ota_display_present) {
             ota_display->i2c_start();
             ota_display->clear();
             ota_display->print(F("OTA Error."));
             ota_display->measure();
         }
+        #endif
         ota_failed = true;
     });
 }
@@ -476,21 +484,23 @@ void reconfigMode() {
         IOTEMPOWER_AP_RECONFIG_NAME, getChipId32() & 255,
         long_blinks, short_blinks);
 
-    // check if a display is present
-    Wire.begin(); // check default i2c // check, if it's the same on esp32 for wemos shield
-    Wire.beginTransmission(0x3c);
-    if (Wire.endTransmission() == 0) {
-        ulog(F("Display shield found."));
-        U8G2_SSD1306_64X48_ER_F_HW_I2C u8g2(U8G2_R0);
-        ota_display = new Display("testdisplay", u8g2);
-        if(ota_display) {
-            ota_display_present = true;
-            ota_display->clear_bus();
-            Wire.begin(); // check default i2c TODO: replace with i2c switch in i2c_device
-            ota_display->measure_init();
-            ota_display->i2c_start();
+    #ifndef IOTEMPOWER_NO_OTA_DISPLAY
+        // check if a display is present
+        Wire.begin(); // check default i2c // check, if it's the same on esp32 for wemos shield
+        Wire.beginTransmission(0x3c);
+        if (Wire.endTransmission() == 0) {
+            ulog(F("Display shield found."));
+            U8G2_SSD1306_64X48_ER_F_HW_I2C u8g2(U8G2_R0);
+            ota_display = new Display("testdisplay", u8g2);
+            if(ota_display) {
+                ota_display_present = true;
+                ota_display->clear_bus();
+                Wire.begin(); // check default i2c TODO: replace with i2c switch in i2c_device
+                ota_display->measure_init();
+                ota_display->i2c_start();
+            }
         }
-    }
+    #endif
 
     ulog(F("Connect to %s with password %s."), ssid.as_cstr(), ap_password);
     
@@ -530,34 +540,38 @@ void reconfigMode() {
             Serial.print(seconds_left);
             Serial.print(F("\r"));
             last_seconds_left = seconds_left;
-            if(ota_display_present) {
-                ota_display->clear();
-                ota_display->print(F("ReconfigMode"));
-                ota_display->cursor(0,2);
-                s.printf("Node: %02x", getChipId32() & 255);
-                ota_display->print(s);
-                ota_display->cursor(0,3);
-                s.printf("Blinks %dL %dS", long_blinks, short_blinks);
-                ota_display->print(s);
-                ota_display->cursor(0,4);
-                s.printf("%ds left", seconds_left);
-                ota_display->print(s);
-                ota_display->cursor(0,5);
-                ota_display->print(F("for adoption"));
-                ota_display->measure(); // trigger drawing
-            }
+            #ifndef IOTEMPOWER_NO_OTA_DISPLAY
+                if(ota_display_present) {
+                    ota_display->clear();
+                    ota_display->print(F("ReconfigMode"));
+                    ota_display->cursor(0,2);
+                    s.printf("Node: %02x", getChipId32() & 255);
+                    ota_display->print(s);
+                    ota_display->cursor(0,3);
+                    s.printf("Blinks %dL %dS", long_blinks, short_blinks);
+                    ota_display->print(s);
+                    ota_display->cursor(0,4);
+                    s.printf("%ds left", seconds_left);
+                    ota_display->print(s);
+                    ota_display->cursor(0,5);
+                    ota_display->print(F("for adoption"));
+                    ota_display->measure(); // trigger drawing
+                }
+            #endif
         }
         yield(); // let WiFi do what it needs to do (if not present -> crash)
     }
 
     Serial.println();
     Serial.println(F("No adoption request done, rebooting..."));
+    #ifndef IOTEMPOWER_NO_OTA_DISPLAY
     if(ota_display_present) {
         ota_display->i2c_start();
         ota_display->clear();
         ota_display->measure();
         ota_display->clear_bus();
     }
+    #endif
     // Serial.println(F("Requesting password reset on next boot."));
     // int magicSize = sizeof(IOTEMPOWER_RECONFIG_MAGIC);
     // char rtcData[magicSize];
@@ -778,8 +792,13 @@ void init_mqtt() {
         #define mqtt_port 8883
         // Configure TLS for espMqttClient
         #ifdef MQTT_TLS_BACKEND_WOLFSSL
+            #ifdef MQTT_TLS_MODE_PSK
+            mqttClient.setPreSharedKey(mqtt_psk_identity, mqtt_psk_key, mqtt_psk_key_len);
+            ulog(F("MQTT TLS backend: wolfSSL PSK."));
+            #else
             mqttClient.setCACert(mqtt_ca_cert);
             ulog(F("MQTT TLS backend: wolfSSL."));
+            #endif
         #elif defined(ESP32)
             mqttClient.setCACert(mqtt_ca_cert);
         #else

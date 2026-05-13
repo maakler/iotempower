@@ -17,6 +17,10 @@ class IoTempowerWolfsslMqttClient : public MqttClientSetup<IoTempowerWolfsslMqtt
 #endif
 
         IoTempowerWolfsslMqttClient& setCACert(const char* ca_cert);
+        IoTempowerWolfsslMqttClient& setPreSharedKey(
+            const char* identity,
+            const unsigned char* key,
+            unsigned int key_len);
         IoTempowerWolfsslMqttClient& setBufferSizes(int rx, int tx);
 
     private:

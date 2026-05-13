@@ -29,7 +29,9 @@ void (iotempower_platform_early_init)() __attribute__((weak));
  * Create a global sleep manager instance available to all ESP nodes
  * This provides sleep management functionality without requiring explicit user declaration
  */
+#ifndef IOTEMPOWER_NO_AUTO_SLEEP_MGR
 sleep_mgr(sleep_mgr);
+#endif
 
 
 // That's the user file (called in folder setup.cpp, but linked as setup.h here)

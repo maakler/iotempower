@@ -25,6 +25,10 @@ def env_list(name):
     return [item.strip() for item in os.environ.get(name, '').splitlines() if item.strip()]
 
 
+def env_enabled(name):
+    return os.environ.get(name, '').lower() not in ('', '0', 'false', 'no')
+
+
 class TokenChecker:
     def __init__(self, filepath):
         with open(filepath, 'r') as f:
@@ -122,8 +126,10 @@ if __name__ == "__main__":
     found_commands = checker.check_for(aliases_main.keys())
     # have a default - TODO: might have to be removed for other MCUs
     found_commands.add("output")
-    found_commands.add("input")
-    found_commands.add("display")  # for dongle adoption mode
+    if not env_enabled("IOTEMPOWER_NO_DEFAULT_INPUT"):
+        found_commands.add("input")
+    if not env_enabled("IOTEMPOWER_NO_DEFAULT_DISPLAY"):
+        found_commands.add("display")  # for dongle adoption mode
 
     # NEW: Extract markers from the code
     marker_extractor = MarkerExtractor(filepath)
@@ -178,7 +184,9 @@ if __name__ == "__main__":
 
     # Auto-include certain devices for all ESP platforms
     # Sleep manager should always be available for power management
-    auto_include_esp = ['sleep_mgr']
+    auto_include_esp = []
+    if not env_enabled("IOTEMPOWER_NO_AUTO_SLEEP_MGR"):
+        auto_include_esp.append('sleep_mgr')
     for auto_device in auto_include_esp:
         if auto_device in devices:
             trimmed_commands.add(auto_device)

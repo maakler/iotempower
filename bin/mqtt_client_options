@@ -10,6 +10,8 @@ mqtt_port=1883
 mqtt_client_options=()
 mqtt_client_env=()
 _iotempower_mqtt_client_config_dir=""
+_iotempower_mqtt_needs_private_config=false
+mqtt_tls_mode="${IOTEMPOWER_MQTT_TLS_MODE:-cert}"
 
 _iotempower_mqtt_client_cleanup() {
     local status=$?
@@ -31,19 +33,55 @@ _iotempower_mqtt_write_client_config() {
 
     ( umask 077; : > "$config_file" ) || return 1
     {
-        printf -- '--username %s\n' "$IOTEMPOWER_MQTT_USER"
-        printf -- '--pw %s\n' "$IOTEMPOWER_MQTT_PW"
+        if [[ "$IOTEMPOWER_MQTT_USER" && "$IOTEMPOWER_MQTT_PW" ]]; then
+            printf -- '--username %s\n' "$IOTEMPOWER_MQTT_USER"
+            printf -- '--pw %s\n' "$IOTEMPOWER_MQTT_PW"
+        fi
+        if [[ "$mqtt_tls_mode" == "psk" ]]; then
+            printf -- '--psk-identity %s\n' "$IOTEMPOWER_MQTT_PSK_IDENTITY"
+            printf -- '--psk %s\n' "${IOTEMPOWER_MQTT_PSK_HEX,,}"
+        fi
     } > "$config_file" || return 1
     chmod 600 "$config_file" || return 1
 }
 
-if [[ "$IOTEMPOWER_MQTT_USE_TLS" == 1 ]]; then
-    if [[ ! "$IOTEMPOWER_MQTT_CERT_FOLDER" ]]; then
-        echo "MQTT TLS enabled, but no certificate folder set. Aborting." 1>&2
+_iotempower_mqtt_validate_psk() {
+    local psk_hex="${IOTEMPOWER_MQTT_PSK_HEX,,}"
+
+    if [[ ! "$IOTEMPOWER_MQTT_PSK_IDENTITY" || ! "$psk_hex" ]]; then
+        echo "MQTT TLS PSK mode requires IOTEMPOWER_MQTT_PSK_IDENTITY and IOTEMPOWER_MQTT_PSK_HEX. Aborting." 1>&2
         exit 1
     fi
+    if [[ "$IOTEMPOWER_MQTT_PSK_IDENTITY" == *[[:space:]:]* ]]; then
+        echo "MQTT TLS PSK identity may not contain whitespace or colon. Aborting." 1>&2
+        exit 1
+    fi
+    if [[ ! "$psk_hex" =~ ^([0-9a-f]{2})+$ || ${#psk_hex} -lt 32 ]]; then
+        echo "IOTEMPOWER_MQTT_PSK_HEX must be even-length hexadecimal with at least 16 bytes. Aborting." 1>&2
+        exit 1
+    fi
+}
+
+if [[ "$mqtt_tls_mode" != "cert" && "$mqtt_tls_mode" != "psk" ]]; then
+    echo "Unsupported MQTT TLS mode: $mqtt_tls_mode" 1>&2
+    exit 1
+fi
+if [[ "$mqtt_tls_mode" == "psk" && "$IOTEMPOWER_MQTT_USE_TLS" != 1 ]]; then
+    echo "MQTT TLS PSK mode requires TLS. Aborting." 1>&2
+    exit 1
+fi
+
+if [[ "$IOTEMPOWER_MQTT_USE_TLS" == 1 ]]; then
+    if [[ "$mqtt_tls_mode" == "psk" ]]; then
+        _iotempower_mqtt_validate_psk
+        _iotempower_mqtt_needs_private_config=true
+    elif [[ ! "$IOTEMPOWER_MQTT_CERT_FOLDER" ]]; then
+        echo "MQTT TLS enabled, but no certificate folder set. Aborting." 1>&2
+        exit 1
+    else
+        mqtt_client_options+=(--cafile "$IOTEMPOWER_MQTT_CERT_FOLDER/ca.crt")
+    fi
     mqtt_port=8883
-    mqtt_client_options+=(--cafile "$IOTEMPOWER_MQTT_CERT_FOLDER/ca.crt")
 fi
 
 if [[ "$IOTEMPOWER_MQTT_USER" || "$IOTEMPOWER_MQTT_PW" ]]; then
@@ -55,6 +93,10 @@ if [[ "$IOTEMPOWER_MQTT_USER" || "$IOTEMPOWER_MQTT_PW" ]]; then
         echo "MQTT auth requires TLS. Aborting." 1>&2
         exit 1
     fi
+    _iotempower_mqtt_needs_private_config=true
+fi
+
+if [[ "$_iotempower_mqtt_needs_private_config" == true ]]; then
     _iotempower_mqtt_client_config_dir="$(mktemp -d "${TMPDIR:-/tmp}/iotempower-mqtt-client.XXXXXXXXXX")" || {
         echo "Failed to create private MQTT client config directory. Aborting." 1>&2
         exit 1
@@ -79,6 +121,8 @@ if [[ "$IOTEMPOWER_MQTT_USER" || "$IOTEMPOWER_MQTT_PW" ]]; then
     mqtt_client_env=(
         IOTEMPOWER_MQTT_USER=
         IOTEMPOWER_MQTT_PW=
+        IOTEMPOWER_MQTT_PSK_IDENTITY=
+        IOTEMPOWER_MQTT_PSK_HEX=
         XDG_CONFIG_HOME="$_iotempower_mqtt_client_config_dir"
     )
 fi
