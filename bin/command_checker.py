@@ -21,6 +21,10 @@ def soft_camelizer(s):
     return '_'.join(word.capitalize() for word in s.split('_'))
 
 
+def env_list(name):
+    return [item.strip() for item in os.environ.get(name, '').splitlines() if item.strip()]
+
+
 class TokenChecker:
     def __init__(self, filepath):
         with open(filepath, 'r') as f:
@@ -190,6 +194,8 @@ if __name__ == "__main__":
     # now generate files
     libs = set()
     libs_esp32 = set()
+    libs.update(env_list("IOTEMPOWER_EXTRA_LIB_DEPS"))
+    extra_build_flags = env_list("IOTEMPOWER_EXTRA_BUILD_FLAGS")
     filenames = set()
     with open(os.path.join(output_dir, "src", "devices_generated.h"), 'w') as devices_generated:
         for command in devices:
@@ -242,6 +248,10 @@ if __name__ == "__main__":
     
     with open(os.path.join(output_dir, "platformio-libs.ini"), 'w') as libs_include:
         print("[common]", file=libs_include)
+        if len(extra_build_flags) > 0:
+            print(f"  extra_build_flags = ", file=libs_include)
+            for flag in extra_build_flags:
+                print(f"    {flag}", file=libs_include)
         if len(libs) > 0:
             print(f"  extra_lib_deps = ", file=libs_include)
             for l in libs:

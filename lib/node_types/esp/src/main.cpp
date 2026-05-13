@@ -137,7 +137,7 @@
     #include <ESP8266WiFi.h>
     #include <ESP8266mDNS.h>
 
-    #ifdef MQTT_USE_TLS
+    #if defined(MQTT_USE_TLS) && !defined(MQTT_TLS_BACKEND_WOLFSSL)
         const char mqtt_ca_cert_char[] PROGMEM = mqtt_ca_cert; 
         BearSSL::X509List *serverTrustedCA = new BearSSL::X509List(mqtt_ca_cert_char);
     #endif
@@ -642,15 +642,15 @@ void flash_mode_select() {
 
 #ifdef MQTT_USE_TLS
     #ifdef ESP32
-        espMqttClientSecure mqttClient(espMqttClientTypes::UseInternalTask::NO);
+        IoTempowerMqttClient mqttClient(espMqttClientTypes::UseInternalTask::NO);
     #else
-        espMqttClientSecure mqttClient;
+        IoTempowerMqttClient mqttClient;
     #endif
 #else
     #ifdef ESP32
-        espMqttClient mqttClient(espMqttClientTypes::UseInternalTask::NO);
+        IoTempowerMqttClient mqttClient(espMqttClientTypes::UseInternalTask::NO);
     #else
-        espMqttClient mqttClient;
+        IoTempowerMqttClient mqttClient;
     #endif
 #endif
 
@@ -777,7 +777,10 @@ void init_mqtt() {
     #ifdef MQTT_USE_TLS
         #define mqtt_port 8883
         // Configure TLS for espMqttClient
-        #ifdef ESP32
+        #ifdef MQTT_TLS_BACKEND_WOLFSSL
+            mqttClient.setCACert(mqtt_ca_cert);
+            ulog(F("MQTT TLS backend: wolfSSL."));
+        #elif defined(ESP32)
             mqttClient.setCACert(mqtt_ca_cert);
         #else
             // ESP8266 - use trust anchors

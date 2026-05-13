@@ -83,7 +83,12 @@
 #include "config-wrapper.h"
 
 #ifdef MQTT_USE_TLS
+#ifdef MQTT_TLS_BACKEND_WOLFSSL
+#include "iotempower-wolfssl-mqtt-client.h"
+typedef IoTempowerWolfsslMqttClient IoTempowerMqttClient;
+#else
 typedef espMqttClientSecure IoTempowerMqttClient;
+#endif
 #else
 typedef espMqttClient IoTempowerMqttClient;
 #endif

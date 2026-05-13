@@ -486,11 +486,59 @@ def test_prepare_build_dir_escapes_generated_mqtt_and_wifi_config(tmp_path):
 
     config_h = (node_dir / "build" / "src" / "config.h").read_text(encoding="utf-8")
     wifi_config_h = (node_dir / "build" / "src" / "wifi-config.h").read_text(encoding="utf-8")
+    platformio_libs = (node_dir / "build" / "platformio-libs.ini").read_text(encoding="utf-8")
     assert '#define mqtt_server "broker\\"host"' in config_h
     assert '#define mqtt_user "user\\"name"' in config_h
     assert '#define mqtt_password "pw\\\\with\\"quotes"' in config_h
     assert '#define mqtt_discovery_prefix "disc\\"prefix"' in config_h
     assert '#define WIFI_PASSWORD "wifi\\"pass\\\\test"' in wifi_config_h
+    assert "wolfSSL" not in platformio_libs
+
+
+def test_prepare_build_dir_generates_wolfssl_backend_macro(tmp_path):
+    system_dir = tmp_path / "system"
+    node_dir = system_dir / "wolfssl-node"
+    cert_dir = system_dir / "certs"
+    local_dir = tmp_path / "local"
+    node_dir.mkdir(parents=True)
+    cert_dir.mkdir()
+    local_dir.mkdir()
+    (cert_dir / "ca.crt").write_text(
+        "-----BEGIN CERTIFICATE-----\nWOLFSSLTEST\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    (system_dir / "system.conf").write_text(
+        'IOTEMPOWER_AP_NAME="review-ap"\n'
+        'IOTEMPOWER_AP_PASSWORD="review-pass"\n'
+        'IOTEMPOWER_AP_IP="192.0.2.1"\n'
+        'IOTEMPOWER_MQTT_HOST="broker"\n'
+        "IOTEMPOWER_MQTT_USE_TLS=1\n"
+        'IOTEMPOWER_MQTT_TLS_BACKEND="wolfssl"\n'
+        f'IOTEMPOWER_MQTT_CERT_FOLDER="{cert_dir}"\n',
+        encoding="utf-8",
+    )
+    (node_dir / "node.conf").write_text('board="wemos d1 mini"\ntopic="wolfssl/node"\n', encoding="utf-8")
+    (node_dir / "setup.cpp").write_text("void setup_iot() {}\n", encoding="utf-8")
+    (node_dir / "key.txt").write_text("0" * 64 + "\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "IOTEMPOWER_ACTIVE": "yes",
+            "IOTEMPOWER_ROOT": str(REPO_ROOT),
+            "IOTEMPOWER_LOCAL": str(local_dir),
+            "IOTEMPOWER_COMPILE_CACHE": str(tmp_path / "compile_cache"),
+        }
+    )
+
+    subprocess.run([str(REPO_ROOT / "bin" / "prepare_build_dir")], cwd=node_dir, env=env, check=True)
+
+    config_h = (node_dir / "build" / "src" / "config.h").read_text(encoding="utf-8")
+    platformio_libs = (node_dir / "build" / "platformio-libs.ini").read_text(encoding="utf-8")
+    assert "#define MQTT_USE_TLS" in config_h
+    assert "#define MQTT_TLS_BACKEND_WOLFSSL" in config_h
+    assert "https://github.com/wolfSSL/Arduino-wolfSSL.git#5.8.4" in platformio_libs
+    assert "-DWOLFSSL_USER_SETTINGS" in platformio_libs
+    assert "-DWOLFSSL_NO_TLS13" in platformio_libs
 
 
 def test_prepare_build_dir_rejects_partial_mqtt_credentials(tmp_path):

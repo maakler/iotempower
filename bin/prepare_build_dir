@@ -95,6 +95,22 @@ link_type_through_base() {
 if [[ -e "node.conf" ]]; then  # started from node-directory
     source "$IOTEMPOWER_ROOT/bin/read_node_config"
     node_type="$board"
+    mqtt_tls_backend="${IOTEMPOWER_MQTT_TLS_BACKEND:-default}"
+
+    if [[ "$mqtt_tls_backend" != "default" && "$mqtt_tls_backend" != "wolfssl" ]]; then
+        echo "Unsupported MQTT TLS backend: $mqtt_tls_backend" 1>&2
+        exit 1
+    fi
+    if [[ "$mqtt_tls_backend" == "wolfssl" && "$IOTEMPOWER_MQTT_USE_TLS" != 1 ]]; then
+        echo "MQTT wolfSSL backend requires TLS. Aborting." 1>&2
+        exit 1
+    fi
+    mqtt_extra_build_flags=""
+    mqtt_extra_lib_deps=""
+    if [[ "$mqtt_tls_backend" == "wolfssl" ]]; then
+        mqtt_extra_build_flags=$'-DWOLFSSL_USER_SETTINGS\n-DWOLFSSL_CLIENT_EXAMPLE\n-DWOLFSSL_NO_TLS13\n-DWOLFSSL_SMALL_STACK_EXTRA\n-DWOLFSSL_SMALL_STACK_CIPHERS\n-DNO_WOLFSSL_SERVER\n-DNO_PSK\n-DNO_RSA\n-DNO_ERROR_STRINGS'
+        mqtt_extra_lib_deps="https://github.com/wolfSSL/Arduino-wolfSSL.git#5.8.4"
+    fi
 
     if [[ "$mqtt_user" || "$mqtt_password" ]]; then
         if [[ ! "$mqtt_user" || ! "$mqtt_password" ]]; then
@@ -190,6 +206,9 @@ EOF
 
     if [[ "$IOTEMPOWER_MQTT_USE_TLS" == 1 ]]; then
         echo '#define MQTT_USE_TLS' >> "$fname.new"
+        if [[ "$mqtt_tls_backend" == "wolfssl" ]]; then
+            echo '#define MQTT_TLS_BACKEND_WOLFSSL' >> "$fname.new"
+        fi
 
         # Add CA certificate to config.h
         if [[ "$IOTEMPOWER_MQTT_CERT_FOLDER" ]]; then
@@ -260,7 +279,9 @@ EOF
     #     "$dest_dir/src/all_devices.txt" > "$fname.new"
     new_dir="$dest_dir/device-selection.tmp"
     mkdir -p "$new_dir/src"
-    commands=$(iot_grun python3 "$IOTEMPOWER_ROOT/bin/command_checker.py" \
+    commands=$(IOTEMPOWER_EXTRA_BUILD_FLAGS="$mqtt_extra_build_flags" \
+        IOTEMPOWER_EXTRA_LIB_DEPS="$mqtt_extra_lib_deps" \
+        iot_grun python3 "$IOTEMPOWER_ROOT/bin/command_checker.py" \
         "$dest_dir/devices.ini" \
         "$dest_dir/src/setup.h" \
         "$new_dir")
