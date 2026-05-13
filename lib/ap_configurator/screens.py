@@ -262,7 +262,7 @@ Then, follow the instructions as they appear in the screen below.
         log.write_line('Starting configuration...')
         self.query_one('#config-btn', Button).disabled = True
 
-        out,err = await run_cmd_async(f"bash ./scripts/iot_openwrt_setup.sh {nname} {npass} {config.BASEIP}")
+        out,err = await run_cmd_async(["bash", "./scripts/iot_openwrt_setup.sh", nname, npass, config.BASEIP])
         log.write_line(out)
         log.write_line(err)
 
