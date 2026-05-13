@@ -148,3 +148,40 @@ def test_rejects_ambiguous_whitespace_and_unsupported_mode(tmp_path):
     )
     assert mode_result.returncode == 1
     assert "unsupported config mode 'custom'" in mode_result.stderr
+
+
+def test_wifi_config_syncs_legacy_aliases(tmp_path):
+    config = tmp_path / "wifi_credentials"
+    config.write_text(
+        textwrap.dedent(
+            """\
+            SSID="gateway name"
+            Password='secret value'
+            GatewayIP=192.168.12.1
+            """
+        )
+    )
+
+    result = run_bash(
+        textwrap.dedent(
+            f"""\
+            set -e
+            source "{PARSER}"
+            iotempower_read_config wifi "{config}"
+            printf '%s\\n' "$SSID" "$Password" "$GatewayIP"
+            printf '%s\\n' "$IOTEMPOWER_AP_NAME" "$IOTEMPOWER_AP_PASSWORD" "$IOTEMPOWER_AP_IP"
+            printf '%s\\n' "$IOTEMPOWER_MQTT_HOST"
+            """
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "gateway name",
+        "secret value",
+        "192.168.12.1",
+        "gateway name",
+        "secret value",
+        "192.168.12.1",
+        "192.168.12.1",
+    ]

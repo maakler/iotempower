@@ -37,6 +37,14 @@ _iotempower_config_key_allowed() {
             esac
             return 1
             ;;
+        wifi)
+            case "$key" in
+                IOTEMPOWER_AP_NAME|IOTEMPOWER_AP_PASSWORD|IOTEMPOWER_AP_IP|IOTEMPOWER_MQTT_HOST|SSID|Password|GatewayIP)
+                    return 0
+                    ;;
+            esac
+            return 1
+            ;;
         *)
             return 1
             ;;
@@ -45,7 +53,7 @@ _iotempower_config_key_allowed() {
 
 _iotempower_config_mode_allowed() {
     case "$1" in
-        system|node)
+        system|node|wifi)
             return 0
             ;;
         *)
@@ -58,6 +66,15 @@ _iotempower_config_ltrim() {
     local text="$1"
     text="${text#"${text%%[!$' \t\r\n']*}"}"
     printf '%s' "$text"
+}
+
+iotempower_quote_config_value() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//\$/\\$}"
+    value="${value//\`/\\\`}"
+    printf '"%s"' "$value"
 }
 
 _iotempower_config_parse_value() {
@@ -155,6 +172,33 @@ _iotempower_config_parse_value() {
     esac
 }
 
+_iotempower_config_sync_wifi_aliases() {
+    if [[ ${SSID+x} && ! ${IOTEMPOWER_AP_NAME+x} ]]; then
+        IOTEMPOWER_AP_NAME="$SSID"
+    fi
+    if [[ ${IOTEMPOWER_AP_NAME+x} && ! ${SSID+x} ]]; then
+        SSID="$IOTEMPOWER_AP_NAME"
+    fi
+
+    if [[ ${Password+x} && ! ${IOTEMPOWER_AP_PASSWORD+x} ]]; then
+        IOTEMPOWER_AP_PASSWORD="$Password"
+    fi
+    if [[ ${IOTEMPOWER_AP_PASSWORD+x} && ! ${Password+x} ]]; then
+        Password="$IOTEMPOWER_AP_PASSWORD"
+    fi
+
+    if [[ ${GatewayIP+x} && ! ${IOTEMPOWER_AP_IP+x} ]]; then
+        IOTEMPOWER_AP_IP="$GatewayIP"
+    fi
+    if [[ ${IOTEMPOWER_AP_IP+x} && ! ${GatewayIP+x} ]]; then
+        GatewayIP="$IOTEMPOWER_AP_IP"
+    fi
+
+    if [[ ${IOTEMPOWER_AP_IP+x} && ! ${IOTEMPOWER_MQTT_HOST+x} ]]; then
+        IOTEMPOWER_MQTT_HOST="$IOTEMPOWER_AP_IP"
+    fi
+}
+
 iotempower_read_config() {
     local mode="$1"
     local file="$2"
@@ -170,7 +214,7 @@ iotempower_read_config() {
     local i=0
 
     if [[ -z "$mode" || -z "$file" ]]; then
-        echo "iotempower_read_config: usage: iotempower_read_config <system|node> <file>" 1>&2
+        echo "iotempower_read_config: usage: iotempower_read_config <system|node|wifi> <file>" 1>&2
         return 1
     fi
 
@@ -228,4 +272,8 @@ iotempower_read_config() {
             export "$key"
         fi
     done
+
+    if [[ "$mode" == wifi ]]; then
+        _iotempower_config_sync_wifi_aliases
+    fi
 }
