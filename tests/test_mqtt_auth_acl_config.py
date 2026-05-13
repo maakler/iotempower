@@ -324,6 +324,78 @@ def test_mqtt_broker_tls_psk_generates_psk_listener_and_keeps_acl_auth(tmp_path)
     assert oct(psk_file.stat().st_mode & 0o777) == "0o600"
 
 
+def test_mqtt_broker_tls_psk_accepts_node_specific_psk_without_sourcing(tmp_path):
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    _fake_broker_tools(fakebin)
+    system_dir, _, env = _auth_system(tmp_path, fakebin)
+    marker = tmp_path / "node_psk_marker"
+    (system_dir / "system.conf").write_text(
+        'IOTEMPOWER_MQTT_HOST="127.0.0.1"\n'
+        "IOTEMPOWER_MQTT_USE_TLS=1\n"
+        'IOTEMPOWER_MQTT_TLS_MODE="psk"\n'
+        'IOTEMPOWER_MQTT_USER="homeassistant"\n'
+        'IOTEMPOWER_MQTT_PW="secretpw"\n',
+        encoding="utf-8",
+    )
+    (system_dir / "allowed-node" / "node.conf").write_text(
+        'board="wemos d1 mini"\n'
+        f'IOTEMPOWER_MQTT_PSK_IDENTITY="allowed-node-$(touch${{IFS}}{marker})"\n'
+        'IOTEMPOWER_MQTT_PSK_HEX="AABBCCDDEEFF00112233445566778899"\n',
+        encoding="utf-8",
+    )
+    env["FAKE_MOSQUITTO_ARGS"] = str(tmp_path / "mosquitto.args")
+    env["FAKE_PASSWD_ARGS"] = str(tmp_path / "passwd.args")
+
+    result = subprocess.run(
+        ["timeout", "1", "mqtt_broker", "lo", "127.0.0.1"],
+        cwd=system_dir,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    assert result.returncode in {0, 124}
+    assert not marker.exists()
+    psk_file = tmp_path / "local" / "tmp" / "mosquitto" / "psk_file"
+    assert psk_file.read_text(encoding="utf-8") == (
+        f"allowed-node-$(touch${{IFS}}{marker}):aabbccddeeff00112233445566778899\n"
+    )
+    assert oct(psk_file.stat().st_mode & 0o777) == "0o600"
+
+
+def test_mqtt_broker_tls_psk_rejects_duplicate_node_identities(tmp_path):
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    _fake_broker_tools(fakebin)
+    system_dir, _, env = _auth_system(tmp_path, fakebin, psk=True)
+    second_node = system_dir / "second-node"
+    second_node.mkdir()
+    (second_node / "node.conf").write_text(
+        'board="wemos d1 mini"\n'
+        'IOTEMPOWER_MQTT_PSK_IDENTITY="iotempower-node"\n'
+        'IOTEMPOWER_MQTT_PSK_HEX="ffeeddccbbaa99887766554433221100"\n',
+        encoding="utf-8",
+    )
+    env["FAKE_MOSQUITTO_ARGS"] = str(tmp_path / "mosquitto.args")
+    env["FAKE_PASSWD_ARGS"] = str(tmp_path / "passwd.args")
+
+    result = subprocess.run(
+        ["mqtt_broker", "lo", "127.0.0.1"],
+        cwd=system_dir,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Duplicate MQTT TLS PSK identity 'iotempower-node'" in result.stderr
+
+
 def test_mqtt_broker_acl_generation_does_not_source_node_conf(tmp_path):
     fakebin = tmp_path / "fakebin"
     fakebin.mkdir()
@@ -798,6 +870,52 @@ def test_prepare_build_dir_generates_wolfssl_psk_config_without_ca(tmp_path):
     assert "-DNO_PSK" not in platformio_libs
     assert "-DWOLFSSL_NO_PEM" in platformio_libs
     assert "-DWOLFSSL_STATIC_PSK" in platformio_libs
+
+
+def test_prepare_build_dir_wolfssl_psk_prefers_node_specific_credentials(tmp_path):
+    system_dir = tmp_path / "system"
+    node_dir = system_dir / "wolfssl-psk-node"
+    local_dir = tmp_path / "local"
+    node_dir.mkdir(parents=True)
+    local_dir.mkdir()
+    (system_dir / "system.conf").write_text(
+        'IOTEMPOWER_AP_NAME="review-ap"\n'
+        'IOTEMPOWER_AP_PASSWORD="review-pass"\n'
+        'IOTEMPOWER_AP_IP="192.0.2.1"\n'
+        'IOTEMPOWER_MQTT_HOST="broker"\n'
+        "IOTEMPOWER_MQTT_USE_TLS=1\n"
+        'IOTEMPOWER_MQTT_TLS_BACKEND="wolfssl"\n'
+        'IOTEMPOWER_MQTT_TLS_MODE="psk"\n'
+        'IOTEMPOWER_MQTT_PSK_IDENTITY="system-identity"\n'
+        'IOTEMPOWER_MQTT_PSK_HEX="00112233445566778899AABBCCDDEEFF"\n',
+        encoding="utf-8",
+    )
+    (node_dir / "node.conf").write_text(
+        'board="wemos d1 mini"\n'
+        'topic="wolfssl/psk"\n'
+        'IOTEMPOWER_MQTT_PSK_IDENTITY="node-identity"\n'
+        'IOTEMPOWER_MQTT_PSK_HEX="FFEEDDCCBBAA99887766554433221100"\n',
+        encoding="utf-8",
+    )
+    (node_dir / "setup.cpp").write_text("void setup_iot() {}\n", encoding="utf-8")
+    (node_dir / "key.txt").write_text("0" * 64 + "\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "IOTEMPOWER_ACTIVE": "yes",
+            "IOTEMPOWER_ROOT": str(REPO_ROOT),
+            "IOTEMPOWER_LOCAL": str(local_dir),
+            "IOTEMPOWER_COMPILE_CACHE": str(tmp_path / "compile_cache"),
+        }
+    )
+
+    subprocess.run([str(REPO_ROOT / "bin" / "prepare_build_dir")], cwd=node_dir, env=env, check=True)
+
+    config_h = (node_dir / "build" / "src" / "config.h").read_text(encoding="utf-8")
+    assert '#define mqtt_psk_identity "node-identity"' in config_h
+    assert "system-identity" not in config_h
+    assert "0xff, 0xee, 0xdd, 0xcc" in config_h
+    assert "#define mqtt_psk_key_len 16" in config_h
 
 
 def test_prepare_build_dir_wolfssl_keeps_explicit_default_opt_out_devices(tmp_path):

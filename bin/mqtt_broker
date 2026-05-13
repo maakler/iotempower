@@ -81,26 +81,80 @@ mqtt_write_acl_file() {
 mqtt_write_psk_file() {
     local psk_file="$1"
     local psk_hex="${IOTEMPOWER_MQTT_PSK_HEX,,}"
+    local system_dir=""
+    local node_conf=""
+    local node_identity=""
+    local node_psk_hex=""
+    local psk_entries=0
     local old_umask=""
+    declare -A psk_identities=()
 
-    [[ "$IOTEMPOWER_MQTT_PSK_IDENTITY" && "$psk_hex" ]] \
-        || mqtt_fail "MQTT TLS PSK mode requires IOTEMPOWER_MQTT_PSK_IDENTITY and IOTEMPOWER_MQTT_PSK_HEX. Aborting."
-    [[ "$IOTEMPOWER_MQTT_PSK_IDENTITY" != *[[:space:]:]* ]] \
-        || mqtt_fail "MQTT TLS PSK identity may not contain whitespace or colon. Aborting."
-    [[ "$psk_hex" =~ ^([0-9a-f]{2})+$ && ${#psk_hex} -ge 32 ]] \
-        || mqtt_fail "IOTEMPOWER_MQTT_PSK_HEX must be even-length hexadecimal with at least 16 bytes. Aborting."
+    if [[ "$IOTEMPOWER_MQTT_PSK_IDENTITY" || "$psk_hex" ]]; then
+        [[ "$IOTEMPOWER_MQTT_PSK_IDENTITY" && "$psk_hex" ]] \
+            || mqtt_fail "MQTT TLS PSK mode requires both IOTEMPOWER_MQTT_PSK_IDENTITY and IOTEMPOWER_MQTT_PSK_HEX when either is set. Aborting."
+        mqtt_validate_psk_entry "$IOTEMPOWER_MQTT_PSK_IDENTITY" "$psk_hex"
+    fi
 
     old_umask="$(umask)"
     umask 077
-    printf '%s:%s\n' "$IOTEMPOWER_MQTT_PSK_IDENTITY" "$psk_hex" > "$psk_file" || {
+    : > "$psk_file" || {
         umask "$old_umask"
         return 1
     }
+
+    if [[ "$IOTEMPOWER_MQTT_PSK_IDENTITY" && "$psk_hex" ]]; then
+        mqtt_append_psk_entry "$psk_file" "$IOTEMPOWER_MQTT_PSK_IDENTITY" "$psk_hex" \
+            || { umask "$old_umask"; return 1; }
+        psk_identities["$IOTEMPOWER_MQTT_PSK_IDENTITY"]=1
+        ((psk_entries++))
+    fi
+
+    if [[ "$IOTEMPOWER_SYSTEM_CONFIG" && -e "$IOTEMPOWER_SYSTEM_CONFIG" ]]; then
+        system_dir="$(dirname "$IOTEMPOWER_SYSTEM_CONFIG")"
+        while IFS= read -r -d '' node_conf; do
+            node_identity="$(mqtt_read_node_config_var "$node_conf" "IOTEMPOWER_MQTT_PSK_IDENTITY")" \
+                || mqtt_fail "Failed to parse IOTEMPOWER_MQTT_PSK_IDENTITY in $node_conf. Aborting."
+            node_psk_hex="$(mqtt_read_node_config_var "$node_conf" "IOTEMPOWER_MQTT_PSK_HEX")" \
+                || mqtt_fail "Failed to parse IOTEMPOWER_MQTT_PSK_HEX in $node_conf. Aborting."
+            node_psk_hex="${node_psk_hex,,}"
+            [[ ! "$node_identity" && ! "$node_psk_hex" ]] && continue
+            [[ "$node_identity" && "$node_psk_hex" ]] \
+                || mqtt_fail "MQTT TLS PSK node config requires both IOTEMPOWER_MQTT_PSK_IDENTITY and IOTEMPOWER_MQTT_PSK_HEX in $node_conf. Aborting."
+            mqtt_validate_psk_entry "$node_identity" "$node_psk_hex"
+            [[ ! "${psk_identities[$node_identity]+set}" ]] \
+                || mqtt_fail "Duplicate MQTT TLS PSK identity '$node_identity' in $node_conf. Aborting."
+            mqtt_append_psk_entry "$psk_file" "$node_identity" "$node_psk_hex" \
+                || { umask "$old_umask"; return 1; }
+            psk_identities["$node_identity"]=1
+            ((psk_entries++))
+        done < <(find "$system_dir" -name node.conf -print0)
+    fi
+
+    (( psk_entries > 0 )) \
+        || mqtt_fail "MQTT TLS PSK mode requires at least one system or node PSK identity/key pair. Aborting."
     chmod 600 "$psk_file" || {
         umask "$old_umask"
         return 1
     }
     umask "$old_umask"
+}
+
+mqtt_validate_psk_entry() {
+    local psk_identity="$1"
+    local psk_hex="$2"
+
+    [[ "$psk_identity" != *[[:space:]:]* ]] \
+        || mqtt_fail "MQTT TLS PSK identity may not contain whitespace or colon. Aborting."
+    [[ "$psk_hex" =~ ^([0-9a-f]{2})+$ && ${#psk_hex} -ge 32 ]] \
+        || mqtt_fail "IOTEMPOWER_MQTT_PSK_HEX must be even-length hexadecimal with at least 16 bytes. Aborting."
+}
+
+mqtt_append_psk_entry() {
+    local psk_file="$1"
+    local psk_identity="$2"
+    local psk_hex="$3"
+
+    printf '%s:%s\n' "$psk_identity" "$psk_hex" >> "$psk_file"
 }
 
 mqtt_node_topic_from_path() {
@@ -137,19 +191,28 @@ mqtt_node_topic_from_path() {
 
 mqtt_read_node_topic() {
     local node_conf="$1"
-    local line=""
-    local value=""
     local parsed_topic=""
 
+    parsed_topic="$(mqtt_read_node_config_var "$node_conf" "topic")" || return 1
+    printf '%s' "$parsed_topic"
+}
+
+mqtt_read_node_config_var() {
+    local node_conf="$1"
+    local key="$2"
+    local line=""
+    local value=""
+    local parsed_value=""
+
     while IFS= read -r line || [[ "$line" ]]; do
-        [[ "$line" =~ ^[[:space:]]*topic[[:space:]]*= ]] || continue
+        [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*= ]] || continue
         value="${line#*=}"
         value="${value#"${value%%[![:space:]]*}"}"
         value="${value%"${value##*[![:space:]]}"}"
-        parsed_topic="$(mqtt_parse_config_value "$value")" || return 1
+        parsed_value="$(mqtt_parse_config_value "$value")" || return 1
     done < "$node_conf"
 
-    printf '%s' "$parsed_topic"
+    printf '%s' "$parsed_value"
 }
 
 mqtt_parse_config_value() {
