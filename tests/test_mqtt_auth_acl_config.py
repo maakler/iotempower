@@ -12,6 +12,41 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+def _write_valid_ec_ca(cert_dir: Path) -> None:
+    key_path = cert_dir / "ca.key"
+    subprocess.run(
+        [
+            "openssl",
+            "ecparam",
+            "-name",
+            "prime256v1",
+            "-genkey",
+            "-noout",
+            "-out",
+            str(key_path),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-new",
+            "-key",
+            str(key_path),
+            "-sha256",
+            "-days",
+            "365",
+            "-subj",
+            "/CN=IoTempower Test CA",
+            "-out",
+            str(cert_dir / "ca.crt"),
+        ],
+        check=True,
+    )
+
+
 def _auth_system(
     tmp_path: Path,
     fakebin: Path,
@@ -660,10 +695,7 @@ def test_prepare_build_dir_generates_wolfssl_backend_macro(tmp_path):
     node_dir.mkdir(parents=True)
     cert_dir.mkdir()
     local_dir.mkdir()
-    (cert_dir / "ca.crt").write_text(
-        "-----BEGIN CERTIFICATE-----\nWOLFSSLTEST\n-----END CERTIFICATE-----\n",
-        encoding="utf-8",
-    )
+    _write_valid_ec_ca(cert_dir)
     (system_dir / "system.conf").write_text(
         'IOTEMPOWER_AP_NAME="review-ap"\n'
         'IOTEMPOWER_AP_PASSWORD="review-pass"\n'
@@ -695,9 +727,15 @@ def test_prepare_build_dir_generates_wolfssl_backend_macro(tmp_path):
     build_src = node_dir / "build" / "src"
     assert "#define MQTT_USE_TLS" in config_h
     assert "#define MQTT_TLS_BACKEND_WOLFSSL" in config_h
+    assert "#define MQTT_TLS_CA_CERT_DER" in config_h
+    assert "static const unsigned char mqtt_ca_cert[] = {" in config_h
+    assert "#define mqtt_ca_cert_len" in config_h
     assert "https://github.com/wolfSSL/Arduino-wolfSSL.git#5.8.4" in platformio_libs
     assert "-DWOLFSSL_USER_SETTINGS" in platformio_libs
     assert "-DWOLFSSL_NO_TLS13" in platformio_libs
+    assert "-DHAVE_MAX_FRAGMENT" in platformio_libs
+    assert "-DWOLFSSL_NO_PEM" in platformio_libs
+    assert "-DNO_PSK" in platformio_libs
     assert "-DNO_SESSION_CACHE" in platformio_libs
     assert "-DEMC_RX_BUFFER_SIZE=512" in platformio_libs
     assert "-DEMC_TX_BUFFER_SIZE=512" in platformio_libs
@@ -758,6 +796,7 @@ def test_prepare_build_dir_generates_wolfssl_psk_config_without_ca(tmp_path):
     assert "#define mqtt_psk_key_len 16" in config_h
     assert "mqtt_ca_cert" not in config_h
     assert "-DNO_PSK" not in platformio_libs
+    assert "-DWOLFSSL_NO_PEM" in platformio_libs
     assert "-DWOLFSSL_STATIC_PSK" in platformio_libs
 
 

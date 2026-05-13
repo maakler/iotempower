@@ -17,6 +17,9 @@ class IoTempowerWolfsslMqttClient : public MqttClientSetup<IoTempowerWolfsslMqtt
 #endif
 
         IoTempowerWolfsslMqttClient& setCACert(const char* ca_cert);
+        IoTempowerWolfsslMqttClient& setCACertDer(
+            const unsigned char* ca_cert,
+            unsigned int ca_cert_len);
         IoTempowerWolfsslMqttClient& setPreSharedKey(
             const char* identity,
             const unsigned char* key,

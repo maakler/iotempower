@@ -68,6 +68,17 @@ hex_to_c_array() {
     done
 }
 
+binary_file_to_c_array() {
+    local file="$1"
+    local sep=""
+    local byte=""
+
+    while read -r byte; do
+        printf '%s0x%s' "$sep" "$byte"
+        sep=", "
+    done < <(od -An -tx1 -v "$file" | tr -s '[:space:]' '\n' | sed '/^$/d')
+}
+
 copy_type_through_base() {
     # $1: source directory
     # $2: type (folder to copy)
@@ -133,9 +144,9 @@ if [[ -e "node.conf" ]]; then  # started from node-directory
     mqtt_no_default_display=""
     mqtt_no_auto_sleep_mgr=""
     if [[ "$mqtt_tls_backend" == "wolfssl" ]]; then
-        mqtt_extra_build_flags=$'-DWOLFSSL_USER_SETTINGS\n-DWOLFSSL_CLIENT_EXAMPLE\n-DWOLFSSL_NO_TLS13\n-DWOLFSSL_SMALL_STACK_EXTRA\n-DWOLFSSL_SMALL_STACK_CIPHERS\n-DNO_WOLFSSL_SERVER\n-DNO_RSA\n-DNO_SESSION_CACHE\n-DNO_ERROR_STRINGS\n-DEMC_RX_BUFFER_SIZE=512\n-DEMC_TX_BUFFER_SIZE=512\n-DEMC_MIN_FREE_MEMORY=4096\n-DIOTEMPOWER_NO_DEFAULT_INPUT\n-DIOTEMPOWER_NO_DEFAULT_DISPLAY\n-DIOTEMPOWER_NO_AUTO_SLEEP_MGR\n-DIOTEMPOWER_NO_OTA_DISPLAY\n-DIOTEMPOWER_MAX_DEVICES=8\n-DIOTEMPOWER_MAX_SUBDEVICES=4\n-DIOTEMPOWER_MAX_STRLEN=96\n-DIOTEMPOWER_MAX_BUFLEN=512\n-DLOG_LINE_MAX_LEN=96\n-DIOTEMPOWER_DO_LATER_MAP_SIZE=16'
+        mqtt_extra_build_flags=$'-DWOLFSSL_USER_SETTINGS\n-DWOLFSSL_CLIENT_EXAMPLE\n-DWOLFSSL_NO_TLS13\n-DHAVE_MAX_FRAGMENT\n-DNO_WOLFSSL_SERVER\n-DNO_RSA\n-DNO_SESSION_CACHE\n-DNO_ERROR_STRINGS\n-DEMC_RX_BUFFER_SIZE=512\n-DEMC_TX_BUFFER_SIZE=512\n-DEMC_MIN_FREE_MEMORY=4096\n-DIOTEMPOWER_NO_DEFAULT_INPUT\n-DIOTEMPOWER_NO_DEFAULT_DISPLAY\n-DIOTEMPOWER_NO_AUTO_SLEEP_MGR\n-DIOTEMPOWER_NO_OTA_DISPLAY\n-DIOTEMPOWER_MAX_DEVICES=8\n-DIOTEMPOWER_MAX_SUBDEVICES=4\n-DIOTEMPOWER_MAX_STRLEN=96\n-DIOTEMPOWER_MAX_BUFLEN=512\n-DLOG_LINE_MAX_LEN=96\n-DIOTEMPOWER_DO_LATER_MAP_SIZE=16'
         if [[ "$mqtt_tls_mode" == "psk" ]]; then
-            mqtt_extra_build_flags+=$'\n-DWOLFSSL_STATIC_PSK'
+            mqtt_extra_build_flags+=$'\n-DWOLFSSL_NO_PEM\n-DWOLFSSL_SMALL_STACK_EXTRA\n-DWOLFSSL_SMALL_STACK_CIPHERS\n-DWOLFSSL_STATIC_PSK'
         else
             mqtt_extra_build_flags+=$'\n-DNO_PSK'
         fi
@@ -270,11 +281,33 @@ EOF
             # Add CA certificate to config.h
             cert_file="$IOTEMPOWER_MQTT_CERT_FOLDER/ca.crt"
             if [[ -e "$cert_file" ]]; then
-                {
-                    echo -n "#define mqtt_ca_cert \""
-                    sed 's/\\/\\\\/g; s/"/\\"/g; s/$/\\n/' "$cert_file" | tr -d '\n'
-                    echo "\""
-                } >> "$fname.new"
+                if [[ "$mqtt_tls_backend" == "wolfssl" ]]; then
+                    cert_der_file="$(mktemp)"
+                    if openssl x509 -in "$cert_file" -outform der -out "$cert_der_file" >/dev/null 2>&1; then
+                        mqtt_extra_build_flags+=$'\n-DWOLFSSL_NO_PEM'
+                        echo '#define MQTT_TLS_CA_CERT_DER' >> "$fname.new"
+                        echo '#ifndef IOTEMPOWER_MQTT_CA_CERT_DEFINED' >> "$fname.new"
+                        echo '#define IOTEMPOWER_MQTT_CA_CERT_DEFINED' >> "$fname.new"
+                        printf 'static const unsigned char mqtt_ca_cert[] = {%s};\n' \
+                            "$(binary_file_to_c_array "$cert_der_file")" >> "$fname.new"
+                        printf '#define mqtt_ca_cert_len %d\n' \
+                            "$(wc -c < "$cert_der_file")" >> "$fname.new"
+                        echo '#endif' >> "$fname.new"
+                    else
+                        {
+                            echo -n "#define mqtt_ca_cert \""
+                            sed 's/\\/\\\\/g; s/"/\\"/g; s/$/\\n/' "$cert_file" | tr -d '\n'
+                            echo "\""
+                        } >> "$fname.new"
+                    fi
+                    rm -f "$cert_der_file"
+                else
+                    {
+                        echo -n "#define mqtt_ca_cert \""
+                        sed 's/\\/\\\\/g; s/"/\\"/g; s/$/\\n/' "$cert_file" | tr -d '\n'
+                        echo "\""
+                    } >> "$fname.new"
+                fi
             else
                 echo "CA certificate not found at $cert_file. TLS will not work." 1>&2;
                 exit 1;

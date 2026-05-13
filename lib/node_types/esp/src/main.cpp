@@ -796,7 +796,11 @@ void init_mqtt() {
             mqttClient.setPreSharedKey(mqtt_psk_identity, mqtt_psk_key, mqtt_psk_key_len);
             ulog(F("MQTT TLS backend: wolfSSL PSK."));
             #else
+            #ifdef MQTT_TLS_CA_CERT_DER
+            mqttClient.setCACertDer(mqtt_ca_cert, mqtt_ca_cert_len);
+            #else
             mqttClient.setCACert(mqtt_ca_cert);
+            #endif
             ulog(F("MQTT TLS backend: wolfSSL."));
             #endif
         #elif defined(ESP32)
